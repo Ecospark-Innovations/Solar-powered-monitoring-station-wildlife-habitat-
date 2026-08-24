@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    container_name: wildlife-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-wildlife}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      POSTGRES_DB: ${DB_NAME:-wildlife_monitoring}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-wildlife}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wildlife-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: wildlife-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wildlife-network
+
+  # Backend API Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: wildlife-api
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      DATABASE_URL: postgresql://${DB_USER:-wildlife}:${DB_PASSWORD:-changeme}@db:5432/${DB_NAME:-wildlife_monitoring}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-this}
+      API_KEY: ${API_KEY:-api-key-change-this}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3001}
+      S3_BUCKET: ${S3_BUCKET:-wildlife-images}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+      - ./uploads:/app/uploads
+    networks:
+      - wildlife-network
+    restart: unless-stopped
+
+  # Frontend Web Dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wildlife-web
+    environment:
+      REACT_APP_API_BASE_URL: ${API_BASE_URL:-http://localhost:3000/api}
+      REACT_APP_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+    ports:
+      - "3001:80"
+    depends_on:
+      - backend
+    networks:
+      - wildlife-network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: wildlife-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - wildlife-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  wildlife-network:
+    driver: bridge
