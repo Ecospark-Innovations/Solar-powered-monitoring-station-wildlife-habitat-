@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../db');
 const { Op } = require('sequelize');
 
-// POST /api/events - Log wildlife event
+// POST /api/events - Log event
 router.post('/', async (req, res) => {
   try {
     const { device_id, event_type, confidence, metadata } = req.body;
@@ -23,9 +23,8 @@ router.post('/', async (req, res) => {
     const event = await db.Event.create({
       deviceId: device.id,
       event_type,
-      confidence: confidence || 0.8,
-      metadata: metadata || {},
-      device_timestamp: new Date()
+      confidence: confidence || 0.5,
+      metadata: metadata || {}
     });
 
     res.status(201).json({
@@ -34,8 +33,8 @@ router.post('/', async (req, res) => {
       data: event
     });
   } catch (error) {
-    console.error('Event POST error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Event create error:', error);
+    res.status(500).json({ error: 'Failed to log event' });
   }
 });
 
@@ -45,7 +44,6 @@ router.get('/', async (req, res) => {
     const { deviceId, eventType, startDate, endDate, limit = 100, offset = 0 } = req.query;
 
     const where = {};
-    if (deviceId) where.deviceId = deviceId;
     if (eventType) where.event_type = eventType;
     if (startDate || endDate) {
       where.createdAt = {};
@@ -53,12 +51,21 @@ router.get('/', async (req, res) => {
       if (endDate) where.createdAt[Op.lte] = new Date(endDate);
     }
 
+    let deviceIdFilter = null;
+    if (deviceId) {
+      const device = await db.Device.findOne({
+        where: { deviceId }
+      });
+      if (device) deviceIdFilter = device.id;
+    }
+
+    if (deviceIdFilter) where.deviceId = deviceIdFilter;
+
     const events = await db.Event.findAndCountAll({
       where,
       include: [{
         model: db.Device,
-        as: 'device',
-        attributes: ['name', 'deviceId', 'habitat_type']
+        attributes: ['name', 'habitat_type']
       }],
       order: [['createdAt', 'DESC']],
       limit: Math.min(parseInt(limit), 1000),
@@ -72,39 +79,7 @@ router.get('/', async (req, res) => {
     });
   } catch (error) {
     console.error('Events GET error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/events/timeline/:deviceId - Get timeline of events for device
-router.get('/timeline/:deviceId', async (req, res) => {
-  try {
-    const { days = 7 } = req.query;
-    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-    const device = await db.Device.findByPk(req.params.deviceId);
-    if (!device) {
-      return res.status(404).json({ error: 'Device not found' });
-    }
-
-    const events = await db.Event.findAll({
-      where: {
-        deviceId: req.params.deviceId,
-        createdAt: { [Op.gte]: startDate }
-      },
-      order: [['createdAt', 'DESC']]
-    });
-
-    res.json({
-      success: true,
-      device: device.name,
-      period_days: days,
-      total_events: events.length,
-      data: events
-    });
-  } catch (error) {
-    console.error('Timeline GET error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Failed to fetch events' });
   }
 });
 

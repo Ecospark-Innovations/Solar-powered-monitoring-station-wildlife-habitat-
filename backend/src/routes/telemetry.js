@@ -1,34 +1,32 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const Joi = require('joi');
 const { Op } = require('sequelize');
+const Joi = require('joi');
 
-// Validation schema
 const telemetrySchema = Joi.object({
   device_id: Joi.string().required(),
-  temperature: Joi.number().required(),
-  humidity: Joi.number().required(),
-  pressure: Joi.number().required(),
+  temperature: Joi.number(),
+  humidity: Joi.number(),
+  pressure: Joi.number(),
   voc: Joi.number(),
   pm25: Joi.number(),
   pm10: Joi.number(),
   uv_index: Joi.number(),
   battery_voltage: Joi.number(),
   solar_voltage: Joi.number(),
-  motion_detected: Joi.boolean()
+  motion_detected: Joi.boolean(),
+  signal_strength: Joi.number()
 });
 
-// POST /api/telemetry - Receive telemetry data from device
+// POST /api/telemetry - Submit telemetry data
 router.post('/', async (req, res) => {
   try {
-    // Validate input
     const { error, value } = telemetrySchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Find device
     const device = await db.Device.findOne({
       where: { deviceId: value.device_id }
     });
@@ -37,7 +35,6 @@ router.post('/', async (req, res) => {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    // Create telemetry record
     const telemetry = await db.Telemetry.create({
       deviceId: device.id,
       temperature: value.temperature,
@@ -50,16 +47,11 @@ router.post('/', async (req, res) => {
       battery_voltage: value.battery_voltage,
       solar_voltage: value.solar_voltage,
       motion_detected: value.motion_detected,
-      device_timestamp: new Date()
+      signal_strength: value.signal_strength
     });
 
-    // Update device status
-    await device.update({
-      battery_voltage: value.battery_voltage,
-      solar_voltage: value.solar_voltage,
-      last_telemetry_at: new Date(),
-      status: 'active'
-    });
+    // Update device last telemetry timestamp
+    await device.update({ last_telemetry_at: new Date() });
 
     res.status(201).json({
       success: true,
@@ -67,8 +59,8 @@ router.post('/', async (req, res) => {
       data: telemetry
     });
   } catch (error) {
-    console.error('Telemetry POST error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Telemetry error:', error);
+    res.status(500).json({ error: 'Failed to record telemetry' });
   }
 });
 
@@ -78,7 +70,10 @@ router.get('/', async (req, res) => {
     const { deviceId, startDate, endDate, limit = 100, offset = 0 } = req.query;
 
     const where = {};
-    if (deviceId) where.deviceId = deviceId;
+    if (deviceId) {
+      const device = await db.Device.findOne({ where: { deviceId } });
+      if (device) where.deviceId = device.id;
+    }
     if (startDate || endDate) {
       where.createdAt = {};
       if (startDate) where.createdAt[Op.gte] = new Date(startDate);
@@ -87,11 +82,6 @@ router.get('/', async (req, res) => {
 
     const telemetry = await db.Telemetry.findAndCountAll({
       where,
-      include: [{
-        model: db.Device,
-        as: 'device',
-        attributes: ['name', 'deviceId']
-      }],
       order: [['createdAt', 'DESC']],
       limit: Math.min(parseInt(limit), 1000),
       offset: parseInt(offset)
@@ -104,64 +94,68 @@ router.get('/', async (req, res) => {
     });
   } catch (error) {
     console.error('Telemetry GET error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Failed to fetch telemetry' });
   }
 });
 
-// GET /api/telemetry/:id - Get specific telemetry record
-router.get('/:id', async (req, res) => {
+// GET /api/telemetry/stats/summary - Get aggregated statistics
+router.get('/stats/summary', async (req, res) => {
   try {
-    const telemetry = await db.Telemetry.findByPk(req.params.id, {
-      include: [{
-        model: db.Device,
-        as: 'device'
-      }]
+    const { deviceId, days = 7 } = req.query;
+
+    const where = {
+      createdAt: {
+        [Op.gte]: new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+      }
+    };
+
+    if (deviceId) {
+      const device = await db.Device.findOne({ where: { deviceId } });
+      if (device) where.deviceId = device.id;
+    }
+
+    const telemetry = await db.Telemetry.findAll({
+      where,
+      attributes: ['temperature', 'humidity', 'pm25', 'pm10', 'battery_voltage']
     });
 
-    if (!telemetry) {
-      return res.status(404).json({ error: 'Telemetry record not found' });
+    const stats = {
+      avg_temp: 0,
+      min_temp: Infinity,
+      max_temp: -Infinity,
+      avg_humidity: 0,
+      avg_pm25: 0,
+      avg_battery: 0,
+      total_readings: telemetry.length
+    };
+
+    if (telemetry.length > 0) {
+      let tempSum = 0, humidSum = 0, pm25Sum = 0, batterySum = 0;
+      telemetry.forEach(t => {
+        if (t.temperature) {
+          tempSum += t.temperature;
+          stats.min_temp = Math.min(stats.min_temp, t.temperature);
+          stats.max_temp = Math.max(stats.max_temp, t.temperature);
+        }
+        if (t.humidity) humidSum += t.humidity;
+        if (t.pm25) pm25Sum += t.pm25;
+        if (t.battery_voltage) batterySum += t.battery_voltage;
+      });
+      stats.avg_temp = (tempSum / telemetry.length).toFixed(2);
+      stats.avg_humidity = (humidSum / telemetry.length).toFixed(2);
+      stats.avg_pm25 = (pm25Sum / telemetry.length).toFixed(2);
+      stats.avg_battery = (batterySum / telemetry.length).toFixed(2);
+      if (stats.min_temp === Infinity) stats.min_temp = null;
     }
 
     res.json({
       success: true,
-      data: telemetry
-    });
-  } catch (error) {
-    console.error('Telemetry GET/:id error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/telemetry/stats/summary - Get telemetry summary stats
-router.get('/stats/summary', async (req, res) => {
-  try {
-    const { deviceId, days = 7 } = req.query;
-    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-    const where = { createdAt: { [Op.gte]: startDate } };
-    if (deviceId) where.deviceId = deviceId;
-
-    const { sequelize } = db;
-    const stats = await db.Telemetry.findAll({
-      attributes: [
-        [sequelize.fn('AVG', sequelize.col('temperature')), 'avg_temp'],
-        [sequelize.fn('MIN', sequelize.col('temperature')), 'min_temp'],
-        [sequelize.fn('MAX', sequelize.col('temperature')), 'max_temp'],
-        [sequelize.fn('AVG', sequelize.col('humidity')), 'avg_humidity'],
-        [sequelize.fn('AVG', sequelize.col('pm25')), 'avg_pm25']
-      ],
-      where,
-      raw: true
-    });
-
-    res.json({
-      success: true,
       period_days: days,
-      data: stats[0]
+      data: stats
     });
   } catch (error) {
-    console.error('Telemetry stats error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch statistics' });
   }
 });
 
